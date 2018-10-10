@@ -1,0 +1,6 @@
+apiVersion: projectriff.io/v1alpha1
+kind: Stream
+metadata:
+  name: example-stream
+spec:
+  definition: square | hello

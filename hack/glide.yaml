@@ -1,0 +1,4 @@
+package: github.com/projectriff/stream-controller/hack
+import:
+- package: k8s.io/code-generator
+  version: release-1.9

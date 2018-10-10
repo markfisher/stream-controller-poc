@@ -1,0 +1,14 @@
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: stream-controller
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: stream-controller
+    spec:
+      containers:
+      - name: stream-controller
+        image: github.com/projectriff/stream-controller/cmd/stream-controller

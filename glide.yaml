@@ -1,0 +1,17 @@
+package: github.com/projectriff/stream-controller
+import:
+- package: k8s.io/apimachinery
+- package: k8s.io/client-go
+  version: 7d04d0e2a0a1a4d4a1cd6baa432a2301492e4e65
+#  version: ^7.0.0
+- package: github.com/golang/groupcache
+- package: github.com/go-martini/martini
+  version: ^1.0.0
+- package: github.com/codegangsta/inject
+  version: ^1.0.0-rc1
+- package: github.com/knative/serving
+  version: 3da9b7a56f155567b15ac46aad16c96a17972e50
+- package: github.com/knative/eventing
+  version: f8e956305ed4bc07220d48905b0f1045a0043693
+- package: github.com/knative/pkg
+  version: bc264c290f777cc51f53644a1996f5e8887dcba6
