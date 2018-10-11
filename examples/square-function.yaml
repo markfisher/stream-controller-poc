@@ -1,0 +1,7 @@
+apiVersion: projectriff.io/v1alpha1
+kind: Function
+metadata:
+  name: square
+spec:
+  repo: https://github.com/markfisher/riff-square
+

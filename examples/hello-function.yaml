@@ -1,0 +1,8 @@
+apiVersion: projectriff.io/v1alpha1
+kind: Function
+metadata:
+  name: hello
+spec:
+  image: gcr.io/cf-spring-funkytown/mf-riff-sample-hello:v1
+
+
