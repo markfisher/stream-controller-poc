@@ -29,6 +29,8 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 
 	eventingclientset "github.com/knative/eventing/pkg/client/clientset/versioned"
+	servingclientset "github.com/knative/serving/pkg/client/clientset/versioned"
+
 	clientset "github.com/projectriff/stream-controller/pkg/client/clientset/versioned"
 	informers "github.com/projectriff/stream-controller/pkg/client/informers/externalversions"
 	"github.com/projectriff/stream-controller/pkg/controllers/stream"
@@ -57,6 +59,11 @@ func main() {
 		glog.Fatalf("Error building kubernetes clientset: %s", err.Error())
 	}
 
+	servingClient, err := servingclientset.NewForConfig(cfg)
+	if err != nil {
+		glog.Fatalf("Error building serving clientset: %s", err.Error())
+	}
+
 	eventingClient, err := eventingclientset.NewForConfig(cfg)
 	if err != nil {
 		glog.Fatalf("Error building eventing clientset: %s", err.Error())
@@ -71,7 +78,7 @@ func main() {
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
 	streamInformerFactory := informers.NewSharedInformerFactory(streamClient, time.Second*30)
 
-	controller := stream.NewController(kubeClient, eventingClient, streamClient,
+	controller := stream.NewController(kubeClient, servingClient, eventingClient, streamClient,
 		streamInformerFactory.Projectriff().V1alpha1().Streams())
 
 	go kubeInformerFactory.Start(stopCh)

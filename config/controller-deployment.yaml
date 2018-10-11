@@ -12,3 +12,7 @@ spec:
       containers:
       - name: stream-controller
         image: github.com/projectriff/stream-controller/cmd/stream-controller
+        args:
+        - -logtostderr
+        - -stderrthreshold
+        - INFO

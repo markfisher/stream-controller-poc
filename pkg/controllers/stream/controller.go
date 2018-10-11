@@ -22,11 +22,9 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -43,7 +41,9 @@ import (
 
 	channelv1alpha1 "github.com/knative/eventing/pkg/apis/channels/v1alpha1"
 	eventingclientset "github.com/knative/eventing/pkg/client/clientset/versioned"
-	"github.com/knative/pkg/apis/duck/v1alpha1"
+
+	servingv1alpha1 "github.com/knative/serving/pkg/apis/serving/v1alpha1"
+	servingclientset "github.com/knative/serving/pkg/client/clientset/versioned"
 )
 
 const controllerAgentName = "stream-controller"
@@ -64,7 +64,7 @@ const (
 )
 
 // TODO replace with a Function CRD to hold this information
-var functions = map[string]string{
+var functionImages = map[string]string{
 	"square": "gcr.io/cf-spring-funkytown/mf-riff-square:v1",
 	"hello":  "gcr.io/cf-spring-funkytown/mf-riff-sample-hello:v1",
 }
@@ -73,6 +73,9 @@ var functions = map[string]string{
 type Controller struct {
 	// kubeclientset is a standard kubernetes clientset
 	kubeclientset kubernetes.Interface
+
+	// clientset for Knative Serving
+	servingclientset servingclientset.Interface
 
 	// clientset for Knative Eventing
 	eventingclientset eventingclientset.Interface
@@ -97,6 +100,7 @@ type Controller struct {
 // NewController returns a new stream controller
 func NewController(
 	kubeclientset kubernetes.Interface,
+	servingclientset servingclientset.Interface,
 	eventingclientset eventingclientset.Interface,
 	streamclientset clientset.Interface,
 	streamInformer informers.StreamInformer) *Controller {
@@ -112,12 +116,14 @@ func NewController(
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, corev1.EventSource{Component: controllerAgentName})
 
 	controller := &Controller{
-		kubeclientset:   kubeclientset,
-		streamclientset: streamclientset,
-		streamsLister:   streamInformer.Lister(),
-		streamsSynced:   streamInformer.Informer().HasSynced,
-		workqueue:       workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Streams"),
-		recorder:        recorder,
+		kubeclientset:     kubeclientset,
+		servingclientset:  servingclientset,
+		eventingclientset: eventingclientset,
+		streamclientset:   streamclientset,
+		streamsLister:     streamInformer.Lister(),
+		streamsSynced:     streamInformer.Informer().HasSynced,
+		workqueue:         workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "Streams"),
+		recorder:          recorder,
 	}
 
 	glog.Info("Setting up event handlers")
@@ -243,7 +249,6 @@ func (c *Controller) syncHandler(key string) error {
 			runtime.HandleError(fmt.Errorf("stream '%s' in work queue no longer exists", key))
 			return nil
 		}
-
 		return err
 	}
 
@@ -252,20 +257,40 @@ func (c *Controller) syncHandler(key string) error {
 		return fmt.Errorf("%s: definition must be specified", key)
 	}
 
+	var replyTo = "replies-channel"
 	// TODO: call the Java service to parse the definition
-	for _, fn := range strings.Split(definition, "|") {
-		fn = strings.TrimSpace(fn)
+	//for _, fn := range sort.Reverse(strings.Split(definition, "|")) {
+	s := strings.Split(definition, "|")
+	for i := len(s) - 1; i >= 0; i-- {
+		fn := strings.TrimSpace(s[i])
 		glog.Infof("deploying function %s", fn)
-	}
-
-	// TODO: create the KService for each app in the definition
-	//channel, err = c.eventingclientset.ChannelsV1alpha1().Channels(stream.Namespace).Create(newChannel(stream))
-
-	// If an error occurs during Get/Create, we'll requeue the item so we can
-	// attempt processing again later. This could have been caused by a
-	// temporary network failure, or any other transient reason.
-	if err != nil {
-		return err
+		// create the KService for the function
+		image, exists := functionImages[fn]
+		if !exists {
+			return fmt.Errorf("unable to determine image for function %s", fn)
+		}
+		kservice := newKnativeService(stream, fn, image, namespace)
+		_, err = c.servingclientset.ServingV1alpha1().Services(namespace).Create(kservice)
+		if err != nil {
+			return err
+		}
+		glog.Infof("using image %s for function %s", image, fn)
+		// create the input channel for the function
+		channel := newChannel(stream, fmt.Sprintf("%s-%s", stream.Name, fn), namespace)
+		_, err = c.eventingclientset.ChannelsV1alpha1().Channels(namespace).Create(channel)
+		if err != nil {
+			if !errors.IsAlreadyExists(err) {
+				return err
+			}
+			glog.Infof("channel %s already exists", channel.Name)
+		}
+		// create the Subscription
+		subscription := newSubscription(channel.Name, fn, replyTo, namespace)
+		replyTo = fmt.Sprintf("%s-channel", channel.Name)
+		_, err = c.eventingclientset.ChannelsV1alpha1().Subscriptions(namespace).Create(subscription)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Finally, we update the status block of the Stream resource to reflect the
@@ -275,7 +300,8 @@ func (c *Controller) syncHandler(key string) error {
 		return err
 	}
 
-	c.recorder.Event(stream, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
+	// TODO: figure out why this is not working
+	//c.recorder.Event(stream, corev1.EventTypeNormal, SuccessSynced, MessageResourceSynced)
 	return nil
 }
 
@@ -349,52 +375,54 @@ func (c *Controller) handleObject(obj interface{}) {
 // newKnativeService creates a new Knative Service for a Stream resource. It also sets
 // the appropriate OwnerReferences on the resource so handleObject can discover
 // the Stream resource that 'owns' it.
-func newKnativeService(stream *streamv1alpha1.Stream, name string) *appsv1.Deployment {
-	labels := map[string]string{
-		"app":        name,
-		"controller": stream.Name,
-	}
-	return &appsv1.Deployment{
+func newKnativeService(stream *streamv1alpha1.Stream, name string, image string, namespace string) *servingv1alpha1.Service {
+	// labels := map[string]string{
+	// 	"app":        name,
+	// 	"controller": stream.Name,
+	// }
+	return &servingv1alpha1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: stream.Namespace,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(stream, schema.GroupVersionKind{
-					Group:   streamv1alpha1.SchemeGroupVersion.Group,
-					Version: streamv1alpha1.SchemeGroupVersion.Version,
-					Kind:    "Stream",
-				}),
-			},
+			Namespace: namespace,
 		},
-		Spec: appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: labels,
-			},
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: labels,
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  name,
-							Image: "TODO",
+		Spec: servingv1alpha1.ServiceSpec{
+			RunLatest: &servingv1alpha1.RunLatestType{
+				Configuration: servingv1alpha1.ConfigurationSpec{
+					RevisionTemplate: servingv1alpha1.RevisionTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      name,
+							Namespace: namespace,
+						},
+						Spec: servingv1alpha1.RevisionSpec{
+							Container: corev1.Container{
+								Image: image,
+							},
 						},
 					},
 				},
 			},
 		},
 	}
+	// ObjectMeta: metav1.ObjectMeta{
+	// 	Name:      name,
+	// 	Namespace: stream.Namespace,
+	// 	OwnerReferences: []metav1.OwnerReference{
+	// 		*metav1.NewControllerRef(stream, schema.GroupVersionKind{
+	// 			Group:   streamv1alpha1.SchemeGroupVersion.Group,
+	// 			Version: streamv1alpha1.SchemeGroupVersion.Version,
+	// 			Kind:    "Stream",
+	// 		}),
 }
 
-func newChannel(stream *streamv1alpha1.Stream) *channelv1alpha1.Channel {
-	labels := map[string]string{
-		"controller": stream.Name,
-	}
+func newChannel(stream *streamv1alpha1.Stream, name string, namespace string) *channelv1alpha1.Channel {
+	//labels := map[string]string{
+	//	"controller": stream.Name,
+	//}
 	return &channelv1alpha1.Channel{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      fmt.Sprintf("%s-channel", stream.Name),
-			Namespace: stream.Namespace,
+			Name:      name,
+			Namespace: namespace,
+			// TODO:
 			//OwnerReferences: []metav1.OwnerReference{
 			//	*metav1.NewControllerRef(stream, schema.GroupVersionKind{
 			//		Group:   streamv1alpha1.SchemeGroupVersion.Group,
@@ -404,7 +432,29 @@ func newChannel(stream *streamv1alpha1.Stream) *channelv1alpha1.Channel {
 			//},
 		},
 		Spec: channelv1alpha1.ChannelSpec{
-			ClusterBus: "stub"
+			ClusterBus: "stub",
+		},
+	}
+}
+
+func newSubscription(channelName string, functionName string, replyToChannelName string, namespace string) *channelv1alpha1.Subscription {
+	return &channelv1alpha1.Subscription{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      functionName,
+			Namespace: namespace,
+			// TODO:
+			//OwnerReferences: []metav1.OwnerReference{
+			//	*metav1.NewControllerRef(stream, schema.GroupVersionKind{
+			//		Group:   streamv1alpha1.SchemeGroupVersion.Group,
+			//		Version: streamv1alpha1.SchemeGroupVersion.Version,
+			//		Kind:    "Stream",
+			//	}),
+			//},
+		},
+		Spec: channelv1alpha1.SubscriptionSpec{
+			Channel:    channelName,
+			Subscriber: functionName,
+			ReplyTo:    replyToChannelName,
 		},
 	}
 }
