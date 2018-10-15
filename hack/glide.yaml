@@ -1,4 +1,5 @@
 package: github.com/projectriff/stream-controller/hack
 import:
 - package: k8s.io/code-generator
-  version: release-1.9
+#  version: release-1.9
+  version: kubernetes-1.11.0

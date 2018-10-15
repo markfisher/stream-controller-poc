@@ -1,0 +1,7 @@
+apiVersion: projectriff.io/v1alpha1
+kind: Stream
+metadata:
+  name: demo
+spec:
+  definition: square | hello --greeting=Hello
+  #definition: square | hello --greeting=👋

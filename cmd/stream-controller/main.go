@@ -30,6 +30,7 @@ import (
 
 	eventingclientset "github.com/knative/eventing/pkg/client/clientset/versioned"
 	servingclientset "github.com/knative/serving/pkg/client/clientset/versioned"
+	servinginformers "github.com/knative/serving/pkg/client/informers/externalversions"
 
 	clientset "github.com/projectriff/stream-controller/pkg/client/clientset/versioned"
 	informers "github.com/projectriff/stream-controller/pkg/client/informers/externalversions"
@@ -68,7 +69,6 @@ func main() {
 	if err != nil {
 		glog.Fatalf("Error building eventing clientset: %s", err.Error())
 	}
-	//restClient := kubernetes.Clientset.RESTClient(*kubeClient)
 
 	streamClient, err := clientset.NewForConfig(cfg)
 	if err != nil {
@@ -77,9 +77,12 @@ func main() {
 
 	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, time.Second*30)
 	streamInformerFactory := informers.NewSharedInformerFactory(streamClient, time.Second*30)
+	servingInformerFactory := servinginformers.NewSharedInformerFactory(servingClient, time.Second*30)
 
 	controller := stream.NewController(kubeClient, servingClient, eventingClient, streamClient,
-		streamInformerFactory.Projectriff().V1alpha1().Streams())
+		streamInformerFactory.Projectriff().V1alpha1().Streams(),
+		streamInformerFactory.Projectriff().V1alpha1().Functions(),
+		servingInformerFactory.Serving().V1alpha1().Services())
 
 	go kubeInformerFactory.Start(stopCh)
 	go streamInformerFactory.Start(stopCh)

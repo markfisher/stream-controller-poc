@@ -19,7 +19,6 @@ package gitcreds
 import (
 	"flag"
 	"fmt"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -28,6 +27,8 @@ import (
 
 const (
 	annotationPrefix = "build.knative.dev/git-"
+	basicAuthFlag    = "basic-git"
+	sshFlag          = "ssh-git"
 )
 
 var (
@@ -37,10 +38,10 @@ var (
 
 func flags(fs *flag.FlagSet) {
 	basicConfig = basicGitConfig{entries: make(map[string]basicEntry)}
-	fs.Var(&basicConfig, "basic-git", "List of secret=url pairs.")
+	fs.Var(&basicConfig, basicAuthFlag, "List of secret=url pairs.")
 
 	sshConfig = sshGitConfig{entries: make(map[string]sshEntry)}
-	fs.Var(&sshConfig, "ssh-git", "List of secret=url pairs.")
+	fs.Var(&sshConfig, sshFlag, "List of secret=url pairs.")
 }
 
 func init() {
@@ -60,19 +61,17 @@ func (*gitConfigBuilder) MatchingAnnotations(secret *corev1.Secret) []string {
 	var flags []string
 	switch secret.Type {
 	case corev1.SecretTypeBasicAuth:
-		flagName = "basic-git"
+		flagName = basicAuthFlag
 
 	case corev1.SecretTypeSSHAuth:
-		flagName = "ssh-git"
+		flagName = sshFlag
 
 	default:
 		return flags
 	}
 
-	for k, v := range secret.Annotations {
-		if strings.HasPrefix(k, annotationPrefix) {
-			flags = append(flags, fmt.Sprintf("-%s=%s=%s", flagName, secret.Name, v))
-		}
+	for _, v := range credentials.SortAnnotations(secret.Annotations, annotationPrefix) {
+		flags = append(flags, fmt.Sprintf("-%s=%s=%s", flagName, secret.Name, v))
 	}
 	return flags
 }

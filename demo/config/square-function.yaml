@@ -3,5 +3,5 @@ kind: Function
 metadata:
   name: square
 spec:
-  repo: https://github.com/markfisher/riff-square
+  image: gcr.io/cf-spring-funkytown/mf-riff-square:v1
 
