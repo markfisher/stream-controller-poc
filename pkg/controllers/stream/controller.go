@@ -47,6 +47,8 @@ import (
 	channelv1alpha1 "github.com/knative/eventing/pkg/apis/channels/v1alpha1"
 	eventingclientset "github.com/knative/eventing/pkg/client/clientset/versioned"
 
+	buildv1alpha1 "github.com/knative/build/pkg/apis/build/v1alpha1"
+
 	servingv1alpha1 "github.com/knative/serving/pkg/apis/serving/v1alpha1"
 	servingclientset "github.com/knative/serving/pkg/client/clientset/versioned"
 	servinginformers "github.com/knative/serving/pkg/client/informers/externalversions/serving/v1alpha1"
@@ -304,12 +306,11 @@ func (c *Controller) syncHandler(key string) error {
 			return err
 		}
 		image := function.Spec.Image
-		if image == "" { // TODO: add support for repo
-			return fmt.Errorf("image required for function %s", functionName)
-		}
+		repo := function.Spec.Repo
+		artifact := function.Spec.Artifact
 
 		// create the KService for the function
-		kservice := newKnativeService(stream, functionName, app.Args, image, namespace)
+		kservice := newKnativeService(stream, functionName, artifact, app.Args, repo, image, namespace)
 		_, err = c.servingclientset.ServingV1alpha1().Services(namespace).Create(kservice)
 		if err != nil {
 			if !errors.IsAlreadyExists(err) {
@@ -432,7 +433,7 @@ func (c *Controller) handleObject(obj interface{}) {
 // newKnativeService creates a new Knative Service for a Stream resource. It also sets
 // the appropriate OwnerReferences on the resource so handleObject can discover
 // the Stream resource that 'owns' it.
-func newKnativeService(stream *streamv1alpha1.Stream, name string, args map[string]string, image string, namespace string) *servingv1alpha1.Service {
+func newKnativeService(stream *streamv1alpha1.Stream, name string, artifact string, args map[string]string, repo string, image string, namespace string) *servingv1alpha1.Service {
 	// labels := map[string]string{
 	// 	"app":        name,
 	// 	"controller": stream.Name,
@@ -459,20 +460,72 @@ func newKnativeService(stream *streamv1alpha1.Stream, name string, args map[stri
 		},
 		Spec: servingv1alpha1.ServiceSpec{
 			RunLatest: &servingv1alpha1.RunLatestType{
-				Configuration: servingv1alpha1.ConfigurationSpec{
-					RevisionTemplate: servingv1alpha1.RevisionTemplateSpec{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      resourceName,
-							Namespace: namespace,
-						},
-						Spec: servingv1alpha1.RevisionSpec{
-							Container: corev1.Container{
-								Image: image,
-								Env:   envFromArgs(args),
-							},
-						},
-					},
+				Configuration: createConfigurationSpec(resourceName, artifact, args, repo, image, namespace),
+			},
+		},
+	}
+}
+
+func createConfigurationSpec(resourceName string, artifact string, args map[string]string, repo string, image string, namespace string) servingv1alpha1.ConfigurationSpec {
+	if repo == "" {
+		return servingv1alpha1.ConfigurationSpec{
+			RevisionTemplate: createRevisionTemplateSpec(resourceName, namespace, args, image),
+		}
+	}
+	return servingv1alpha1.ConfigurationSpec{
+		Build:            createBuild(resourceName, artifact, repo, image),
+		RevisionTemplate: createRevisionTemplateSpec(resourceName, namespace, args, image),
+	}
+}
+
+func createBuild(resourceName string, artifact string, repo string, image string) *buildv1alpha1.BuildSpec {
+	return &buildv1alpha1.BuildSpec{
+		ServiceAccountName: "riff-build",
+		Source: &buildv1alpha1.SourceSpec{
+			Git: &buildv1alpha1.GitSourceSpec{
+				Revision: "master",
+				Url:      repo,
+			},
+		},
+		Template: &buildv1alpha1.TemplateInstantiationSpec{
+			Name: "riff",
+			Arguments: []buildv1alpha1.ArgumentSpec{
+				buildv1alpha1.ArgumentSpec{
+					Name:  "IMAGE",
+					Value: image,
 				},
+				buildv1alpha1.ArgumentSpec{
+					Name: "INVOKER_PATH",
+					// TODO: make configurable
+					Value: "https://github.com/projectriff/node-function-invoker/raw/v0.0.8/node-invoker.yaml",
+				},
+				buildv1alpha1.ArgumentSpec{
+					Name:  "FUNCTION_ARTIFACT",
+					Value: artifact,
+				},
+				buildv1alpha1.ArgumentSpec{
+					Name:  "FUNCTION_HANDLER",
+					Value: "",
+				},
+				buildv1alpha1.ArgumentSpec{
+					Name:  "FUNCTION_NAME",
+					Value: resourceName,
+				},
+			},
+		},
+	}
+}
+
+func createRevisionTemplateSpec(resourceName string, namespace string, args map[string]string, image string) servingv1alpha1.RevisionTemplateSpec {
+	return servingv1alpha1.RevisionTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName,
+			Namespace: namespace,
+		},
+		Spec: servingv1alpha1.RevisionSpec{
+			Container: corev1.Container{
+				Image: image,
+				Env:   envFromArgs(args),
 			},
 		},
 	}

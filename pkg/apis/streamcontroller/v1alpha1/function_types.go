@@ -34,8 +34,9 @@ type Function struct {
 
 // FunctionSpec is the spec for a Function resource
 type FunctionSpec struct {
-	Image string `json:"image,omitempty"`
-	Repo  string `json:"repo,omitempty"`
+	Image    string `json:"image"`
+	Repo     string `json:"repo,omitempty"`
+	Artifact string `json:"artifact,omitempty"`
 }
 
 // FunctionStatus is the status for a Function resource
