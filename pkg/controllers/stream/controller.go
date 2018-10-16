@@ -27,6 +27,7 @@ import (
 
 	"github.com/golang/glog"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -282,11 +283,12 @@ func (c *Controller) syncHandler(key string) error {
 	client := &http.Client{}
 	res, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("failed to invoke stream parser")
+		return fmt.Errorf("failed to invoke stream parser %v", err)
 	}
+	defer res.Body.Close()
 	bytes, err := ioutil.ReadAll(res.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read stream parser response")
+		return fmt.Errorf("failed to read stream parser response %v", err)
 	}
 	apps := string(bytes)
 	glog.Infof("parsed definition to apps: %s", apps)
@@ -308,45 +310,54 @@ func (c *Controller) syncHandler(key string) error {
 		image := function.Spec.Image
 		repo := function.Spec.Repo
 		artifact := function.Spec.Artifact
+		ksvcName := generateResourceName(stream, functionName)
 
-		// create the KService for the function
-		kservice := newKnativeService(stream, functionName, artifact, app.Args, repo, image, namespace)
-		_, err = c.servingclientset.ServingV1alpha1().Services(namespace).Create(kservice)
+		existing, err := c.servingclientset.ServingV1alpha1().Services(namespace).Get(ksvcName, metav1.GetOptions{})
 		if err != nil {
-			if !errors.IsAlreadyExists(err) {
+			if !errors.IsNotFound(err) {
 				return err
 			}
-			ksvcName := generateResourceName(stream, functionName)
-			existing, err := c.servingclientset.ServingV1alpha1().Services(namespace).Get(ksvcName, metav1.GetOptions{})
-			//c.servicesLister.Services(namespace).Get(ksvcName)
+			// create the KService for the function
+			kservice := newKnativeService(stream, functionName, artifact, app.Args, repo, image, namespace)
+			_, err = c.servingclientset.ServingV1alpha1().Services(namespace).Create(kservice)
 			if err != nil {
 				return err
 			}
-			existing.Spec.RunLatest.Configuration.RevisionTemplate.Spec.Container.Env = envFromArgs(app.Args)
-			serviceClient := c.servingclientset.ServingV1alpha1().Services(namespace)
-			_, err = serviceClient.Update(existing)
+			// create the input channel for the function
+			channel := newChannel(stream, functionName, namespace)
+			_, err = c.eventingclientset.ChannelsV1alpha1().Channels(namespace).Create(channel)
+			if err != nil {
+				if !errors.IsAlreadyExists(err) {
+					return err
+				}
+				glog.Infof("channel %s already exists", channel.Name)
+			}
+			// create the Subscription for the function
+			subscription := newSubscription(stream, channel.Name, replyTo, namespace)
+			replyTo = fmt.Sprintf("%s-channel", channel.Name)
+			_, err = c.eventingclientset.ChannelsV1alpha1().Subscriptions(namespace).Create(subscription)
+			if err != nil {
+				if !errors.IsAlreadyExists(err) {
+					return err
+				}
+				glog.Infof("subscription %s already exists", channel.Name)
+			}
+			err = c.updateStreamStatus(stream)
 			if err != nil {
 				return err
 			}
-		}
-		glog.Infof("using image %s for function %s", image, functionName)
-
-		// create the input channel for the function
-		channel := newChannel(stream, functionName, namespace)
-		_, err = c.eventingclientset.ChannelsV1alpha1().Channels(namespace).Create(channel)
-		if err != nil {
-			if !errors.IsAlreadyExists(err) {
-				return err
+		} else {
+			modified := existing.DeepCopy()
+			modified.Spec.RunLatest.Configuration.RevisionTemplate.Spec.Container.Env = envFromArgs(app.Args)
+			if !equality.Semantic.DeepEqual(existing, modified) {
+				glog.Infof(fmt.Sprintf("updating Knative service: %s", ksvcName))
+				serviceClient := c.servingclientset.ServingV1alpha1().Services(namespace)
+				_, err = serviceClient.Update(modified)
+				if err != nil {
+					return err
+				}
+				glog.Infof(fmt.Sprintf("updated Knative service: %s", ksvcName))
 			}
-			glog.Infof("channel %s already exists", channel.Name)
-		}
-
-		// create the Subscription for the function
-		subscription := newSubscription(stream, channel.Name, replyTo, namespace)
-		replyTo = fmt.Sprintf("%s-channel", channel.Name)
-		_, err = c.eventingclientset.ChannelsV1alpha1().Subscriptions(namespace).Create(subscription)
-		if err != nil {
-			return err
 		}
 	}
 
